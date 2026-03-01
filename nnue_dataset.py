@@ -61,7 +61,8 @@ class TrainingDataProvider:
         batch_size=None,
         filtered=False,
         random_fen_skipping=0,
-        device='cpu'):
+        device='cpu',
+        horizontal_mirroring=False):
 
         self.feature_set = feature_set.encode('utf-8')
         self.create_stream = create_stream
@@ -75,6 +76,7 @@ class TrainingDataProvider:
         self.filtered = filtered
         self.random_fen_skipping = random_fen_skipping
         self.device = device
+        self.horizontal_mirroring = horizontal_mirroring
 
         self.stream = self.create_stream(
             self.feature_set,
@@ -83,7 +85,8 @@ class TrainingDataProvider:
             self.batch_size,
             cyclic,
             filtered,
-            random_fen_skipping
+            random_fen_skipping,
+            horizontal_mirroring
         )
 
     def __iter__(self):
@@ -112,7 +115,8 @@ create_sparse_batch_stream.argtypes = [
     ctypes.c_int,     # batch_size
     ctypes.c_bool,    # cyclic
     ctypes.c_bool,    # filtered
-    ctypes.c_int      # random_fen_skipping
+    ctypes.c_int,     # random_fen_skipping
+    ctypes.c_bool     # horizontal_mirroring
 ]
 destroy_sparse_batch_stream = dll.destroy_sparse_batch_stream
 destroy_sparse_batch_stream.argtypes = [ctypes.c_void_p]
@@ -124,7 +128,7 @@ destroy_sparse_batch = dll.destroy_sparse_batch
 
 
 class SparseBatchProvider(TrainingDataProvider):
-    def __init__(self, feature_set, filename, batch_size, cyclic=True, num_workers=1, filtered=False, random_fen_skipping=0, device='cpu'):
+    def __init__(self, feature_set, filename, batch_size, cyclic=True, num_workers=1, filtered=False, random_fen_skipping=0, device='cpu', horizontal_mirroring=False):
         super(SparseBatchProvider, self).__init__(
             feature_set,
             create_sparse_batch_stream,
@@ -137,10 +141,11 @@ class SparseBatchProvider(TrainingDataProvider):
             batch_size,
             filtered,
             random_fen_skipping,
-            device)
+            device,
+            horizontal_mirroring)
 
 class SparseBatchDataset(torch.utils.data.IterableDataset):
-  def __init__(self, feature_set, filename, batch_size, cyclic=True, num_workers=1, filtered=False, random_fen_skipping=0, device='cpu'):
+  def __init__(self, feature_set, filename, batch_size, cyclic=True, num_workers=1, filtered=False, random_fen_skipping=0, device='cpu', horizontal_mirroring=False):
     super(SparseBatchDataset).__init__()
     self.feature_set = feature_set
     self.filename = filename
@@ -150,9 +155,10 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
     self.filtered = filtered
     self.random_fen_skipping = random_fen_skipping
     self.device = device
+    self.horizontal_mirroring = horizontal_mirroring
 
   def __iter__(self):
-    return SparseBatchProvider(self.feature_set, self.filename, self.batch_size, cyclic=self.cyclic, num_workers=self.num_workers, filtered=self.filtered, random_fen_skipping=self.random_fen_skipping, device=self.device)
+    return SparseBatchProvider(self.feature_set, self.filename, self.batch_size, cyclic=self.cyclic, num_workers=self.num_workers, filtered=self.filtered, random_fen_skipping=self.random_fen_skipping, device=self.device, horizontal_mirroring=self.horizontal_mirroring)
 
 class FixedNumBatchesDataset(Dataset):
   def __init__(self, dataset, num_batches):

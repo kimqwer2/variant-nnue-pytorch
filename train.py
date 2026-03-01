@@ -4,17 +4,18 @@ import nnue_dataset
 import pytorch_lightning as pl
 import features
 import os
+import shutil
 import torch
 from torch import set_num_threads as t_set_num_threads
 from pytorch_lightning import loggers as pl_loggers
 from torch.utils.data import DataLoader, Dataset
 
-def make_data_loaders(train_filename, val_filename, feature_set, num_workers, batch_size, filtered, random_fen_skipping, main_device, epoch_size, val_size):
+def make_data_loaders(train_filename, val_filename, feature_set, num_workers, batch_size, filtered, random_fen_skipping, horizontal_mirroring, main_device, epoch_size, val_size):
   features_name = feature_set.name
   train_infinite = nnue_dataset.SparseBatchDataset(features_name, train_filename, batch_size, num_workers=num_workers,
-                                                   filtered=filtered, random_fen_skipping=random_fen_skipping, device=main_device)
+                                                   filtered=filtered, random_fen_skipping=random_fen_skipping, device=main_device, horizontal_mirroring=horizontal_mirroring)
   val_infinite = nnue_dataset.SparseBatchDataset(features_name, val_filename, batch_size, filtered=filtered,
-                                                   random_fen_skipping=random_fen_skipping, device=main_device)
+                                                   random_fen_skipping=random_fen_skipping, device=main_device, horizontal_mirroring=False)
   # num_workers has to be 0 for sparse, and 1 for dense
   # it currently cannot work in parallel mode but it shouldn't need to
   train = DataLoader(nnue_dataset.FixedNumBatchesDataset(train_infinite, (epoch_size + batch_size - 1) // batch_size), batch_size=None, batch_sampler=None)
@@ -31,6 +32,10 @@ def main():
   parser.add_argument("--end-lambda", default=0.7, type=float, dest='end_lambda', help="Final interpolation weight for search eval target in [0,1].")
   parser.add_argument("--gamma", default=250.0, type=float, dest='gamma', help="Sigmoid scaling factor for converting search eval scores into [0,1] probabilities.")
   parser.add_argument("--draw-weight", default=0.2, type=float, dest='draw_weight', help="Loss weight multiplier for positions with draw outcome target (0.5).")
+  parser.add_argument("--lr", default=1e-4, type=float, dest='lr', help="Base learning rate for optimizer.")
+  parser.add_argument("--lr-warmup-steps", default=0, type=int, dest='lr_warmup_steps', help="Linear LR warmup steps before normal scheduler behavior.")
+  parser.add_argument("--horizontal-mirroring", action='store_true', dest='horizontal_mirroring', help="Enable random horizontal mirroring augmentation for training batches.")
+  parser.add_argument("--save-best-model", action='store_true', dest='save_best_model', help="Also save best validation-loss checkpoint as best_model.pt.")
   parser.add_argument("--num-workers", default=1, type=int, dest='num_workers', help="Number of worker threads to use for data loading. Currently only works well for bin.")
   parser.add_argument("--batch-size", default=-1, type=int, dest='batch_size', help="Number of positions per batch / per iteration. Default on GPU = 8192 on CPU = 128.")
   parser.add_argument("--threads", default=-1, type=int, dest='threads', help="Number of torch threads to use. Default automatic (cores) .")
@@ -56,6 +61,10 @@ def main():
     raise Exception(f'--gamma must be positive, got {args.gamma}.')
   if args.draw_weight < 0.0:
     raise Exception(f'--draw-weight must be non-negative, got {args.draw_weight}.')
+  if args.lr <= 0.0:
+    raise Exception(f'--lr must be positive, got {args.lr}.')
+  if args.lr_warmup_steps < 0:
+    raise Exception(f'--lr-warmup-steps must be non-negative, got {args.lr_warmup_steps}.')
 
   if not os.path.exists(args.train):
     raise Exception('{0} does not exist'.format(args.train))
@@ -71,6 +80,8 @@ def main():
       end_lambda=args.end_lambda,
       gamma=args.gamma,
       draw_weight=args.draw_weight,
+      lr=args.lr,
+      lr_warmup_steps=args.lr_warmup_steps,
     )
     nnue.cuda()
   else:
@@ -82,6 +93,8 @@ def main():
     nnue.end_lambda = args.end_lambda
     nnue.gamma = args.gamma
     nnue.draw_weight = args.draw_weight
+    nnue.lr = args.lr
+    nnue.lr_warmup_steps = args.lr_warmup_steps
     nnue.cuda()
 
   print("Feature set: {}".format(feature_set.name))
@@ -110,15 +123,30 @@ def main():
   print('Using log dir {}'.format(logdir), flush=True)
 
   tb_logger = pl_loggers.TensorBoardLogger(logdir)
-  checkpoint_callback = pl.callbacks.ModelCheckpoint(save_last=True, every_n_epochs=1, save_top_k=-1)
-  trainer = pl.Trainer.from_argparse_args(args, callbacks=[checkpoint_callback], logger=tb_logger)
+  callbacks = [pl.callbacks.ModelCheckpoint(save_last=True, every_n_epochs=1, save_top_k=-1)]
+  best_model_callback = None
+  if args.save_best_model:
+    best_model_callback = pl.callbacks.ModelCheckpoint(
+      monitor='val_loss',
+      mode='min',
+      save_top_k=1,
+      filename='best_model',
+      dirpath=logdir,
+      every_n_epochs=1,
+      save_weights_only=True,
+    )
+    callbacks.append(best_model_callback)
+  trainer = pl.Trainer.from_argparse_args(args, callbacks=callbacks, logger=tb_logger)
 
   main_device = trainer.strategy.root_device if trainer.strategy.root_device.index is None else 'cuda:' + str(trainer.strategy.root_device.index)
 
   print('Using c++ data loader')
-  train, val = make_data_loaders(args.train, args.val, feature_set, args.num_workers, batch_size, not args.no_smart_fen_skipping, args.random_fen_skipping, main_device, args.epoch_size, args.validation_size)
+  train, val = make_data_loaders(args.train, args.val, feature_set, args.num_workers, batch_size, not args.no_smart_fen_skipping, args.random_fen_skipping, args.horizontal_mirroring, main_device, args.epoch_size, args.validation_size)
 
   trainer.fit(nnue, train, val)
+
+  if args.save_best_model and best_model_callback is not None and best_model_callback.best_model_path:
+    shutil.copyfile(best_model_callback.best_model_path, os.path.join(logdir, 'best_model.pt'))
 
 if __name__ == '__main__':
   main()
