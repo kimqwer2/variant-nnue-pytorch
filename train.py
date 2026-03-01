@@ -26,7 +26,11 @@ def main():
   parser.add_argument("train", help="Training data (.bin)")
   parser.add_argument("val", help="Validation data (.bin)")
   parser = pl.Trainer.add_argparse_args(parser)
-  parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_', help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
+  parser.add_argument("--lambda", default=None, type=float, dest='legacy_lambda', help="Deprecated alias for --start-lambda/--end-lambda. If set, both start and end lambda are forced to this value.")
+  parser.add_argument("--start-lambda", default=1.0, type=float, dest='start_lambda', help="Initial interpolation weight for search eval target in [0,1].")
+  parser.add_argument("--end-lambda", default=0.7, type=float, dest='end_lambda', help="Final interpolation weight for search eval target in [0,1].")
+  parser.add_argument("--gamma", default=250.0, type=float, dest='gamma', help="Sigmoid scaling factor for converting search eval scores into [0,1] probabilities.")
+  parser.add_argument("--draw-weight", default=0.2, type=float, dest='draw_weight', help="Loss weight multiplier for positions with draw outcome target (0.5).")
   parser.add_argument("--num-workers", default=1, type=int, dest='num_workers', help="Number of worker threads to use for data loading. Currently only works well for bin.")
   parser.add_argument("--batch-size", default=-1, type=int, dest='batch_size', help="Number of positions per batch / per iteration. Default on GPU = 8192 on CPU = 128.")
   parser.add_argument("--threads", default=-1, type=int, dest='threads', help="Number of torch threads to use. Default automatic (cores) .")
@@ -40,6 +44,19 @@ def main():
   features.add_argparse_args(parser)
   args = parser.parse_args()
 
+  if args.legacy_lambda is not None:
+    args.start_lambda = args.legacy_lambda
+    args.end_lambda = args.legacy_lambda
+
+  for arg_name in ('start_lambda', 'end_lambda'):
+    value = getattr(args, arg_name)
+    if not 0.0 <= value <= 1.0:
+      raise Exception(f'--{arg_name.replace("_", "-")} must be in [0.0, 1.0], got {value}.')
+  if args.gamma <= 0.0:
+    raise Exception(f'--gamma must be positive, got {args.gamma}.')
+  if args.draw_weight < 0.0:
+    raise Exception(f'--draw-weight must be non-negative, got {args.draw_weight}.')
+
   if not os.path.exists(args.train):
     raise Exception('{0} does not exist'.format(args.train))
   if not os.path.exists(args.val):
@@ -48,14 +65,23 @@ def main():
   feature_set = features.get_feature_set_from_name(args.features)
 
   if args.resume_from_model is None:
-    nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_)
+    nnue = M.NNUE(
+      feature_set=feature_set,
+      start_lambda=args.start_lambda,
+      end_lambda=args.end_lambda,
+      gamma=args.gamma,
+      draw_weight=args.draw_weight,
+    )
     nnue.cuda()
   else:
     # Load with weights_only=False to avoid safe_globals complexity
     # This is safe since we trust the checkpoint source
     nnue = torch.load(args.resume_from_model, weights_only=False)
     nnue.set_feature_set(feature_set)
-    nnue.lambda_ = args.lambda_
+    nnue.start_lambda = args.start_lambda
+    nnue.end_lambda = args.end_lambda
+    nnue.gamma = args.gamma
+    nnue.draw_weight = args.draw_weight
     nnue.cuda()
 
   print("Feature set: {}".format(feature_set.name))
