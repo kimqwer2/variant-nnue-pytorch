@@ -453,15 +453,27 @@ struct Stream : AnyStream
 {
     using StorageType = StorageT;
 
-    Stream(int concurrency, const char* filename, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate) :
-        m_stream(training_data::open_sfen_input_file_parallel(concurrency, filename, cyclic, skipPredicate))
+    Stream(int concurrency, const char** filenames, int num_files, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate)
     {
+        m_streams.reserve(num_files);
+        m_stream_mutexes.reserve(num_files);
+        for (int i = 0; i < num_files; ++i)
+        {
+            // For multi-file interleaving, each stream must be cyclic.
+            auto stream = training_data::open_sfen_input_file_parallel(concurrency, filenames[i], true, skipPredicate);
+            if (stream)
+            {
+                m_streams.emplace_back(std::move(stream));
+                m_stream_mutexes.emplace_back(std::make_unique<std::mutex>());
+            }
+        }
     }
 
     virtual StorageT* next() = 0;
 
 protected:
-    std::unique_ptr<training_data::BasicSfenInputStream> m_stream;
+    std::vector<std::unique_ptr<training_data::BasicSfenInputStream>> m_streams;
+    std::vector<std::unique_ptr<std::mutex>> m_stream_mutexes;
 };
 
 template <typename StorageT>
@@ -469,8 +481,8 @@ struct AsyncStream : Stream<StorageT>
 {
     using BaseType = Stream<StorageT>;
 
-    AsyncStream(int concurrency, const char* filename, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate) :
-        BaseType(1, filename, cyclic, skipPredicate)
+    AsyncStream(int concurrency, const char** filenames, int num_files, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate) :
+        BaseType(1, filenames, num_files, cyclic, skipPredicate)
     {
     }
 
@@ -496,13 +508,14 @@ struct FeaturedBatchStream : Stream<StorageT>
 
     static constexpr int num_feature_threads_per_reading_thread = 2;
 
-    FeaturedBatchStream(int concurrency, const char* filename, int batch_size, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate, bool horizontal_mirroring) :
+    FeaturedBatchStream(int concurrency, const char** filenames, int num_files, int batch_size, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate, bool horizontal_mirroring) :
         BaseType(
             std::max(
                 1,
                 concurrency / num_feature_threads_per_reading_thread
             ),
-            filename,
+            filenames,
+            num_files,
             cyclic,
             skipPredicate
         ),
@@ -521,14 +534,33 @@ struct FeaturedBatchStream : Stream<StorageT>
             {
                 entries.clear();
 
+                if (BaseType::m_streams.empty())
+                    break;
+
+                static thread_local std::mt19937 pick_stream_gen(std::random_device{}());
+                std::uniform_int_distribution<std::size_t> pick_stream(0, BaseType::m_streams.size() - 1);
+
+                // True random interleaving: choose a random stream per entry.
+                for (int eidx = 0; eidx < m_batch_size; ++eidx)
                 {
-                    std::unique_lock lock(m_stream_mutex);
-                    BaseType::m_stream->fill(entries, m_batch_size);
-                    if (entries.empty())
+                    const std::size_t stream_idx = pick_stream(pick_stream_gen);
+                    auto& stream = BaseType::m_streams[stream_idx];
+                    auto& stream_mutex = *BaseType::m_stream_mutexes[stream_idx];
+
+                    std::optional<TrainingDataEntry> value;
                     {
-                        break;
+                        std::unique_lock lock(stream_mutex);
+                        value = stream->next();
+                    }
+
+                    if (value.has_value())
+                    {
+                        entries.emplace_back(*value);
                     }
                 }
+
+                if (entries.empty())
+                    break;
 
                 auto batch = new StorageT(FeatureSet{}, entries, m_horizontal_mirroring);
 
@@ -607,7 +639,6 @@ private:
     bool m_horizontal_mirroring;
     std::deque<StorageT*> m_batches;
     std::mutex m_batch_mutex;
-    std::mutex m_stream_mutex;
     std::condition_variable m_batches_not_full;
     std::condition_variable m_batches_any;
     std::atomic_bool m_stop_flag;
@@ -647,34 +678,34 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
 
 extern "C" {
 
-    EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char* feature_set_c, int concurrency, const char* filename, int batch_size, bool cyclic, bool filtered, int random_fen_skipping, bool horizontal_mirroring)
+    EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char* feature_set_c, int concurrency, const char** filenames, int num_files, int batch_size, bool cyclic, bool filtered, int random_fen_skipping, bool horizontal_mirroring)
     {
         auto skipPredicate = make_skip_predicate(filtered, random_fen_skipping);
 
         std::string_view feature_set(feature_set_c);
         if (feature_set == "HalfKP")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKP>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate, horizontal_mirroring);
+            return new FeaturedBatchStream<FeatureSet<HalfKP>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKP^")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKPFactorized>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate, horizontal_mirroring);
+            return new FeaturedBatchStream<FeatureSet<HalfKPFactorized>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKA")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKA>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate, horizontal_mirroring);
+            return new FeaturedBatchStream<FeatureSet<HalfKA>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKA^")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKAFactorized>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate, horizontal_mirroring);
+            return new FeaturedBatchStream<FeatureSet<HalfKAFactorized>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKAv2")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKAv2>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate, horizontal_mirroring);
+            return new FeaturedBatchStream<FeatureSet<HalfKAv2>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKAv2^")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKAv2Factorized>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate, horizontal_mirroring);
+            return new FeaturedBatchStream<FeatureSet<HalfKAv2Factorized>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         fprintf(stderr, "Unknown feature_set %s\n", feature_set_c);
         return nullptr;
@@ -702,7 +733,8 @@ extern "C" {
 
 int main()
 {
-    auto stream = create_sparse_batch_stream("HalfKP", 4, "10m_d3_q_2.bin", 8192, true, false, 0, false);
+    const char* files[] = {"10m_d3_q_2.bin"};
+    auto stream = create_sparse_batch_stream("HalfKP", 4, files, 1, 8192, true, false, 0, false);
     auto t0 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < 1000; ++i)
     {

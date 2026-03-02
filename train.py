@@ -10,9 +10,9 @@ from torch import set_num_threads as t_set_num_threads
 from pytorch_lightning import loggers as pl_loggers
 from torch.utils.data import DataLoader, Dataset
 
-def make_data_loaders(train_filename, val_filename, feature_set, num_workers, batch_size, filtered, random_fen_skipping, horizontal_mirroring, main_device, epoch_size, val_size):
+def make_data_loaders(train_filenames, val_filename, feature_set, num_workers, batch_size, filtered, random_fen_skipping, horizontal_mirroring, main_device, epoch_size, val_size):
   features_name = feature_set.name
-  train_infinite = nnue_dataset.SparseBatchDataset(features_name, train_filename, batch_size, num_workers=num_workers,
+  train_infinite = nnue_dataset.SparseBatchDataset(features_name, train_filenames, batch_size, num_workers=num_workers,
                                                    filtered=filtered, random_fen_skipping=random_fen_skipping, device=main_device, horizontal_mirroring=horizontal_mirroring)
   val_infinite = nnue_dataset.SparseBatchDataset(features_name, val_filename, batch_size, filtered=filtered,
                                                    random_fen_skipping=random_fen_skipping, device=main_device, horizontal_mirroring=False)
@@ -24,7 +24,7 @@ def make_data_loaders(train_filename, val_filename, feature_set, num_workers, ba
 
 def main():
   parser = argparse.ArgumentParser(description="Trains the network.")
-  parser.add_argument("train", help="Training data (.bin)")
+  parser.add_argument("train", nargs='+', help="Training data files (.bin), one or more.")
   parser.add_argument("val", help="Validation data (.bin)")
   parser = pl.Trainer.add_argparse_args(parser)
   parser.add_argument("--lambda", default=None, type=float, dest='legacy_lambda', help="Deprecated alias for --start-lambda/--end-lambda. If set, both start and end lambda are forced to this value.")
@@ -66,8 +66,9 @@ def main():
   if args.lr_warmup_steps < 0:
     raise Exception(f'--lr-warmup-steps must be non-negative, got {args.lr_warmup_steps}.')
 
-  if not os.path.exists(args.train):
-    raise Exception('{0} does not exist'.format(args.train))
+  for train_path in args.train:
+    if not os.path.exists(train_path):
+      raise Exception('{0} does not exist'.format(train_path))
   if not os.path.exists(args.val):
     raise Exception('{0} does not exist'.format(args.val))
 
@@ -102,7 +103,7 @@ def main():
   print("Num virtual features: {}".format(feature_set.num_virtual_features))
   print("Num features: {}".format(feature_set.num_features))
 
-  print("Training with {} validating with {}".format(args.train, args.val))
+  print("Training with {} validating with {}".format(', '.join(args.train), args.val))
 
   pl.seed_everything(args.seed)
   print("Seed {}".format(args.seed))
