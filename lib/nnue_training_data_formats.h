@@ -105,6 +105,7 @@ namespace chess
         Bishop,
         Rook,
         Queen,
+        Wazir,
         MaxPiece = PIECE_TYPES - 1,
         King = MaxPiece + (KING_SQUARES == 1),
 

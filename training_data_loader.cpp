@@ -86,37 +86,35 @@ static int map_king(Square sq)
 
 static float calculate_janggi_winner(const Position& pos, float deom)
 {
-    auto piece_points = [](PieceType pt) -> float {
-        // Janggi mapping requested by user:
-        // Rook=13, JanggiCannon=7, Horse=5, JanggiElephant=3, Wazir=3, Soldier=2.
-        // The current shared enum names are chess-like in this codebase, so we map
-        // by available symbols and preserve the intended Janggi point scale.
-        if (pt == PieceType::Rook) return 13.0f;
-        if (pt == PieceType::Queen) return 7.0f;   // JanggiCannon-equivalent slot
-        if (pt == PieceType::Knight) return 5.0f;  // Horse
-        if (pt == PieceType::Bishop) return 3.0f;  // JanggiElephant
-        if (pt == PieceType::Pawn) return 2.0f;    // Soldier
-
-        const int pti = static_cast<int>(pt);
-        if (pti == 5) return 3.0f; // Wazir-like extra piece slot in PIECE_TYPES=7 variants
-
-        return 0.0f;
-    };
-
-    float white = deom;
+    float white = deom; // Usually 1.5
     float black = 0.0f;
 
-    for (Square sq = Square::MIN; sq <= Square::MAX; ++sq)
-    {
+    for (Square sq = Square::MIN; sq <= Square::MAX; ++sq) {
         const auto p = pos.pieceAt(sq);
-        if (p == Piece::None)
-            continue;
+        if (p == Piece::None) continue;
 
-        const float pts = piece_points(type_of(p));
-        if (color_of(p) == Color::White)
-            white += pts;
-        else
-            black += pts;
+        // Skip the King itself (0 points)
+        if (type_of(p) == PieceType::King) continue;
+
+        float pts = 0.0f;
+        switch (type_of(p)) {
+            case PieceType::Rook:   pts = 13.0f; break; // Cha
+            case PieceType::Queen:  pts = 7.0f;  break; // Po
+            case PieceType::Knight: pts = 5.0f;  break; // Ma
+            case PieceType::Bishop: pts = 3.0f;  break; // Sang
+            case PieceType::Pawn:   pts = 2.0f;  break; // Jol
+
+            // Handle the Advisor (Sa)
+            case PieceType::Wazir:  pts = 3.0f;  break; // Sa
+
+            default:
+                // Fallback for safety.
+                pts = 0.0f;
+                break;
+        }
+
+        if (color_of(p) == Color::White) white += pts;
+        else black += pts;
     }
 
     if (white > black) return 1.0f;
