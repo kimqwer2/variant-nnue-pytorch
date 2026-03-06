@@ -84,44 +84,6 @@ static int map_king(Square sq)
     return int(sq) % int(Square::KNB);
 }
 
-static float calculate_janggi_winner(const Position& pos, float deom)
-{
-    float white = deom; // Usually 1.5
-    float black = 0.0f;
-
-    for (Square sq = Square::MIN; sq <= Square::MAX; ++sq) {
-        const auto p = pos.pieceAt(sq);
-        if (p == Piece::None) continue;
-
-        // Skip the King itself (0 points)
-        if (type_of(p) == PieceType::King) continue;
-
-        float pts = 0.0f;
-        switch (type_of(p)) {
-            case PieceType::Rook:   pts = 13.0f; break; // Cha
-            case PieceType::Queen:  pts = 7.0f;  break; // Po
-            case PieceType::Knight: pts = 5.0f;  break; // Ma
-            case PieceType::Bishop: pts = 3.0f;  break; // Sang
-            case PieceType::Pawn:   pts = 2.0f;  break; // Jol
-
-            // Handle the Advisor (Sa)
-            case PieceType::Wazir:  pts = 3.0f;  break; // Sa
-
-            default:
-                // Fallback for safety.
-                pts = 0.0f;
-                break;
-        }
-
-        if (color_of(p) == Color::White) white += pts;
-        else black += pts;
-    }
-
-    if (white > black) return 1.0f;
-    if (black > white) return 0.0f;
-    return 0.5f;
-}
-
 struct HalfKP {
     static constexpr int NUM_SQ = static_cast<int>(Square::NB);
     static constexpr int NUM_PT = static_cast<int>(PieceType::MaxPiece) * 2;
@@ -389,8 +351,8 @@ struct SparseBatch
     static constexpr bool IS_BATCH = true;
 
     template <typename... Ts>
-    SparseBatch(FeatureSet<Ts...>, const std::vector<TrainingDataEntry>& entries, bool horizontal_mirroring, bool resolve_draws, float deom)
-        : m_horizontal_mirroring(horizontal_mirroring), m_resolve_draws(resolve_draws), m_deom(deom)
+    SparseBatch(FeatureSet<Ts...>, const std::vector<TrainingDataEntry>& entries, bool horizontal_mirroring)
+        : m_horizontal_mirroring(horizontal_mirroring)
     {
         num_inputs = FeatureSet<Ts...>::INPUTS;
         size = entries.size();
@@ -439,8 +401,6 @@ struct SparseBatch
     int* psqt_indices;
     int* layer_stack_indices;
     bool m_horizontal_mirroring;
-    bool m_resolve_draws;
-    float m_deom;
 
     ~SparseBatch()
     {
@@ -463,17 +423,7 @@ private:
         static thread_local std::bernoulli_distribution mirror_coin(0.5);
         const bool do_mirror = m_horizontal_mirroring && mirror_coin(mirror_gen);
         is_white[i] = static_cast<float>(e.pos.sideToMove() == Color::White);
-
-        if (m_resolve_draws && e.result == 0)
-        {
-            const float white_wdl = calculate_janggi_winner(e.pos, m_deom);
-            // Outcome is from side-to-move perspective in training tensors.
-            outcome[i] = is_white[i] > 0.5f ? white_wdl : (1.0f - white_wdl);
-        }
-        else
-        {
-            outcome[i] = (e.result + 1.0f) / 2.0f;
-        }
+        outcome[i] = (e.result + 1.0f) / 2.0f;
 
         score[i] = e.score;
         psqt_indices[i] = (e.pos.pieceCount() - 1) * 8 / MAX_PIECES;
@@ -558,7 +508,7 @@ struct FeaturedBatchStream : Stream<StorageT>
 
     static constexpr int num_feature_threads_per_reading_thread = 2;
 
-    FeaturedBatchStream(int concurrency, const char** filenames, int num_files, int batch_size, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate, bool horizontal_mirroring, bool resolve_draws, float deom) :
+    FeaturedBatchStream(int concurrency, const char** filenames, int num_files, int batch_size, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate, bool horizontal_mirroring) :
         BaseType(
             std::max(
                 1,
@@ -571,9 +521,7 @@ struct FeaturedBatchStream : Stream<StorageT>
         ),
         m_concurrency(concurrency),
         m_batch_size(batch_size),
-        m_horizontal_mirroring(horizontal_mirroring),
-        m_resolve_draws(resolve_draws),
-        m_deom(deom)
+        m_horizontal_mirroring(horizontal_mirroring)
     {
         m_stop_flag.store(false);
 
@@ -614,7 +562,7 @@ struct FeaturedBatchStream : Stream<StorageT>
                 if (entries.empty())
                     break;
 
-                auto batch = new StorageT(FeatureSet{}, entries, m_horizontal_mirroring, m_resolve_draws, m_deom);
+                auto batch = new StorageT(FeatureSet{}, entries, m_horizontal_mirroring);
 
                 {
                     std::unique_lock lock(m_batch_mutex);
@@ -689,8 +637,6 @@ private:
     int m_batch_size;
     int m_concurrency;
     bool m_horizontal_mirroring;
-    bool m_resolve_draws;
-    float m_deom;
     std::deque<StorageT*> m_batches;
     std::mutex m_batch_mutex;
     std::condition_variable m_batches_not_full;
@@ -732,34 +678,34 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
 
 extern "C" {
 
-    EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char* feature_set_c, int concurrency, const char** filenames, int num_files, int batch_size, bool cyclic, bool filtered, int random_fen_skipping, bool horizontal_mirroring, bool resolve_draws, float deom)
+    EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char* feature_set_c, int concurrency, const char** filenames, int num_files, int batch_size, bool cyclic, bool filtered, int random_fen_skipping, bool horizontal_mirroring)
     {
         auto skipPredicate = make_skip_predicate(filtered, random_fen_skipping);
 
         std::string_view feature_set(feature_set_c);
         if (feature_set == "HalfKP")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKP>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring, resolve_draws, deom);
+            return new FeaturedBatchStream<FeatureSet<HalfKP>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKP^")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKPFactorized>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring, resolve_draws, deom);
+            return new FeaturedBatchStream<FeatureSet<HalfKPFactorized>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKA")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKA>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring, resolve_draws, deom);
+            return new FeaturedBatchStream<FeatureSet<HalfKA>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKA^")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKAFactorized>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring, resolve_draws, deom);
+            return new FeaturedBatchStream<FeatureSet<HalfKAFactorized>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKAv2")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKAv2>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring, resolve_draws, deom);
+            return new FeaturedBatchStream<FeatureSet<HalfKAv2>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKAv2^")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKAv2Factorized>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring, resolve_draws, deom);
+            return new FeaturedBatchStream<FeatureSet<HalfKAv2Factorized>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         fprintf(stderr, "Unknown feature_set %s\n", feature_set_c);
         return nullptr;
@@ -788,7 +734,7 @@ extern "C" {
 int main()
 {
     const char* files[] = {"10m_d3_q_2.bin"};
-    auto stream = create_sparse_batch_stream("HalfKP", 4, files, 1, 8192, true, false, 0, false, false, 1.5f);
+    auto stream = create_sparse_batch_stream("HalfKP", 4, files, 1, 8192, true, false, 0, false);
     auto t0 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < 1000; ++i)
     {

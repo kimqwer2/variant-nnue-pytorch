@@ -118,7 +118,7 @@ class NNUE(pl.LightningModule):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0, draw_weight=0.2, lr=1.5e-3):
+  def __init__(self, feature_set, lambda_=1.0, draw_weight=1.0, lr=1.5e-3):
     super(NNUE, self).__init__()
     self.num_psqt_buckets = feature_set.num_psqt_buckets
     self.num_ls_buckets = feature_set.num_ls_buckets
