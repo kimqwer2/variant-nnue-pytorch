@@ -3,7 +3,6 @@ import torch
 from torch import nn
 import pytorch_lightning as pl
 import copy
-import variant
 from feature_transformer import DoubleFeatureTransformerSlice
 
 # 3 layer fully connected network
@@ -119,19 +118,15 @@ class NNUE(pl.LightningModule):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, start_lambda=1.0, end_lambda=0.7, gamma=250.0, draw_weight=0.2, lr=1e-4, lr_warmup_steps=0):
+  def __init__(self, feature_set, lambda_=1.0, lr=1.5e-3):
     super(NNUE, self).__init__()
     self.num_psqt_buckets = feature_set.num_psqt_buckets
     self.num_ls_buckets = feature_set.num_ls_buckets
     self.input = DoubleFeatureTransformerSlice(feature_set.num_features, L1 + self.num_psqt_buckets)
     self.feature_set = feature_set
     self.layer_stacks = LayerStacks(self.num_ls_buckets)
-    self.start_lambda = start_lambda
-    self.end_lambda = end_lambda
-    self.gamma = gamma
-    self.draw_weight = draw_weight
+    self.lambda_ = lambda_
     self.lr = lr
-    self.lr_warmup_steps = lr_warmup_steps
 
     self.weight_clipping = [
       {'params' : [self.layer_stacks.l1.weight], 'min_weight' : -127/64, 'max_weight' : 127/64, 'virtual_params' : self.layer_stacks.l1_fact.weight },
@@ -169,9 +164,8 @@ class NNUE(pl.LightningModule):
 
   def _init_psqt(self):
     input_weights = self.input.weight
-    # Scale PSQT initialization to Janggi material units
-    max_piece_value = max(variant.PIECE_VALUES.values())
-    scale = 1 / float(max_piece_value)
+    # 1.0 / kPonanzaConstant
+    scale = 1 / 600
     with torch.no_grad():
       initial_values = self.feature_set.get_initial_psqt_features()
       assert len(initial_values) == self.feature_set.num_features
@@ -262,38 +256,27 @@ class NNUE(pl.LightningModule):
 
     return x
 
-  def _get_current_lambda(self):
-    if self.trainer is None:
-      return self.start_lambda
-
-    total_steps = getattr(self.trainer, 'estimated_stepping_batches', None)
-    if total_steps is None or total_steps <= 1:
-      progress = 0.0
-    else:
-      progress = min(float(self.global_step) / float(total_steps - 1), 1.0)
-
-    return self.start_lambda + (self.end_lambda - self.start_lambda) * progress
-
   def step_(self, batch, batch_idx, loss_type):
     self._clip_weights()
 
     us, them, white_indices, white_values, black_indices, black_values, outcome, score, psqt_indices, layer_stack_indices = batch
 
-    # Scale score conversion with Janggi piece-value magnitude to avoid chess-specific constants.
-    piece_value_scale = float(max(variant.PIECE_VALUES.values()))
-    out_scaling = float(sum(variant.PIECE_VALUES.values()) / len(variant.PIECE_VALUES))
+    # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
+    # This needs to match the value used in the serializer
+    nnue2score = 600
+    in_scaling = 410
+    out_scaling = 361
 
-    q = (self(us, them, white_indices, white_values, black_indices, black_values, psqt_indices, layer_stack_indices) * piece_value_scale / out_scaling).sigmoid()
-    p = (score / self.gamma).sigmoid()
-    current_lambda = self._get_current_lambda()
-    t = (1.0 - current_lambda) * outcome + current_lambda * p
+    q = (self(us, them, white_indices, white_values, black_indices, black_values, psqt_indices, layer_stack_indices) * nnue2score / out_scaling).sigmoid()
+    t = outcome
+    p = (score / in_scaling).sigmoid()
 
-    draw_mask = torch.isclose(outcome, outcome.new_tensor(0.5))
-    sample_weights = torch.where(draw_mask, outcome.new_tensor(self.draw_weight), outcome.new_tensor(1.0))
-    loss = (((q - t).square().flatten()) * sample_weights.flatten()).mean()
+    loss_eval = (p - q).square().mean()
+    loss_result = (q - t).square().mean()
+    loss = self.lambda_ * loss_eval + (1.0 - self.lambda_) * loss_result
 
     self.log(loss_type, loss)
-    self.log('lambda', current_lambda)
+    self.log('lambda', self.lambda_)
 
     return loss
 
@@ -326,13 +309,6 @@ class NNUE(pl.LightningModule):
     ]
     # increasing the eps leads to less saturated nets with a few dead neurons
     optimizer = ranger.Ranger(train_params, betas=(.9, 0.999), eps=1.0e-7, gc_loc=False, use_gc=False)
-
-    warmup_steps = int(self.lr_warmup_steps)
-    if warmup_steps > 0:
-      warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0e-3, end_factor=1.0, total_iters=warmup_steps)
-      decay = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.987)
-      scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup, decay], milestones=[warmup_steps])
-      return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
 
     # Drop learning rate after 75 epochs
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.987)

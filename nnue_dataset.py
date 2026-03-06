@@ -137,7 +137,7 @@ destroy_sparse_batch = dll.destroy_sparse_batch
 
 
 class SparseBatchProvider(TrainingDataProvider):
-    def __init__(self, feature_set, filenames, batch_size, cyclic=True, num_workers=1, filtered=False, random_fen_skipping=0, device='cpu', horizontal_mirroring=False):
+    def __init__(self, feature_set, filenames, batch_size, cyclic=False, num_workers=1, filtered=False, random_fen_skipping=0, device='cpu', horizontal_mirroring=False):
         super(SparseBatchProvider, self).__init__(
             feature_set,
             create_sparse_batch_stream,
@@ -154,7 +154,7 @@ class SparseBatchProvider(TrainingDataProvider):
             horizontal_mirroring)
 
 class SparseBatchDataset(torch.utils.data.IterableDataset):
-  def __init__(self, feature_set, filenames, batch_size, cyclic=True, num_workers=1, filtered=False, random_fen_skipping=0, device='cpu', horizontal_mirroring=False):
+  def __init__(self, feature_set, filenames, batch_size, cyclic=False, num_workers=1, filtered=False, random_fen_skipping=0, device='cpu', horizontal_mirroring=False):
     super(SparseBatchDataset).__init__()
     self.feature_set = feature_set
     if isinstance(filenames, (str, bytes)):

@@ -459,8 +459,7 @@ struct Stream : AnyStream
         m_stream_mutexes.reserve(num_files);
         for (int i = 0; i < num_files; ++i)
         {
-            // For multi-file interleaving, each stream must be cyclic.
-            auto stream = training_data::open_sfen_input_file_parallel(concurrency, filenames[i], true, skipPredicate);
+            auto stream = training_data::open_sfen_input_file_parallel(concurrency, filenames[i], cyclic, skipPredicate);
             if (stream)
             {
                 m_streams.emplace_back(std::move(stream));
