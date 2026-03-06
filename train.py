@@ -10,12 +10,14 @@ from torch import set_num_threads as t_set_num_threads
 from pytorch_lightning import loggers as pl_loggers
 from torch.utils.data import DataLoader, Dataset
 
-def make_data_loaders(train_filenames, val_filename, feature_set, num_workers, batch_size, filtered, random_fen_skipping, cyclic, horizontal_mirroring, main_device, epoch_size, val_size):
+def make_data_loaders(train_filenames, val_filename, feature_set, num_workers, batch_size, filtered, random_fen_skipping, cyclic, horizontal_mirroring, resolve_draws, deom, main_device, epoch_size, val_size):
   features_name = feature_set.name
   train_infinite = nnue_dataset.SparseBatchDataset(features_name, train_filenames, batch_size, num_workers=num_workers,
-                                                   cyclic=cyclic, filtered=filtered, random_fen_skipping=random_fen_skipping, device=main_device, horizontal_mirroring=horizontal_mirroring)
+                                                   cyclic=cyclic, filtered=filtered, random_fen_skipping=random_fen_skipping, device=main_device,
+                                                   horizontal_mirroring=horizontal_mirroring, resolve_draws=resolve_draws, deom=deom)
   val_infinite = nnue_dataset.SparseBatchDataset(features_name, val_filename, batch_size, filtered=filtered,
-                                                   random_fen_skipping=random_fen_skipping, device=main_device, horizontal_mirroring=False, cyclic=False)
+                                                   random_fen_skipping=random_fen_skipping, device=main_device, horizontal_mirroring=False,
+                                                   cyclic=False, resolve_draws=False, deom=deom)
   # num_workers has to be 0 for sparse, and 1 for dense
   # it currently cannot work in parallel mode but it shouldn't need to
   train = DataLoader(nnue_dataset.FixedNumBatchesDataset(train_infinite, (epoch_size + batch_size - 1) // batch_size), batch_size=None, batch_sampler=None)
@@ -28,9 +30,12 @@ def main():
   parser.add_argument("val", help="Validation data (.bin)")
   parser = pl.Trainer.add_argparse_args(parser)
   parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_', help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
+  parser.add_argument("--draw-weight", default=0.2, type=float, dest='draw_weight', help="Loss weight multiplier for positions with draw outcome target (0.5).")
   parser.add_argument("--lr", default=1.5e-3, type=float, dest='lr', help="Base learning rate for optimizer.")
   parser.add_argument("--cyclic-data", action='store_true', dest='cyclic_data', help="Enable cyclic/infinite data loading for training streams.")
   parser.add_argument("--horizontal-mirroring", action='store_true', dest='horizontal_mirroring', help="Enable random horizontal mirroring augmentation for training batches.")
+  parser.add_argument("--resolve-draws", action='store_true', dest='resolve_draws', help="Resolve draw outcomes on-the-fly using Janggi material tie-break.")
+  parser.add_argument("--deom", default=1.5, type=float, dest='deom', help="Janggi white compensation points for draw tie-break resolution.")
   parser.add_argument("--save-best-model", action='store_true', dest='save_best_model', help="Also save best validation-loss checkpoint as best_model.pt.")
   parser.add_argument("--num-workers", default=1, type=int, dest='num_workers', help="Number of worker threads to use for data loading. Currently only works well for bin.")
   parser.add_argument("--batch-size", default=-1, type=int, dest='batch_size', help="Number of positions per batch / per iteration. Default on GPU = 8192 on CPU = 128.")
@@ -47,6 +52,8 @@ def main():
 
   if not 0.0 <= args.lambda_ <= 1.0:
     raise Exception(f'--lambda must be in [0.0, 1.0], got {args.lambda_}.')
+  if args.draw_weight < 0.0:
+    raise Exception(f'--draw-weight must be non-negative, got {args.draw_weight}.')
   if args.lr <= 0.0:
     raise Exception(f'--lr must be positive, got {args.lr}.')
 
@@ -62,6 +69,7 @@ def main():
     nnue = M.NNUE(
       feature_set=feature_set,
       lambda_=args.lambda_,
+      draw_weight=args.draw_weight,
       lr=args.lr,
     )
     nnue.cuda()
@@ -71,6 +79,7 @@ def main():
     nnue = torch.load(args.resume_from_model, weights_only=False)
     nnue.set_feature_set(feature_set)
     nnue.lambda_ = args.lambda_
+    nnue.draw_weight = args.draw_weight
     nnue.lr = args.lr
     nnue.cuda()
 
@@ -118,7 +127,9 @@ def main():
   main_device = trainer.strategy.root_device if trainer.strategy.root_device.index is None else 'cuda:' + str(trainer.strategy.root_device.index)
 
   print('Using c++ data loader')
-  train, val = make_data_loaders(args.train, args.val, feature_set, args.num_workers, batch_size, not args.no_smart_fen_skipping, args.random_fen_skipping, args.cyclic_data, args.horizontal_mirroring, main_device, args.epoch_size, args.validation_size)
+  train, val = make_data_loaders(args.train, args.val, feature_set, args.num_workers, batch_size, not args.no_smart_fen_skipping,
+                                 args.random_fen_skipping, args.cyclic_data, args.horizontal_mirroring, args.resolve_draws, args.deom,
+                                 main_device, args.epoch_size, args.validation_size)
 
   trainer.fit(nnue, train, val)
 

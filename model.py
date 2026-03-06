@@ -118,7 +118,7 @@ class NNUE(pl.LightningModule):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0, lr=1.5e-3):
+  def __init__(self, feature_set, lambda_=1.0, draw_weight=0.2, lr=1.5e-3):
     super(NNUE, self).__init__()
     self.num_psqt_buckets = feature_set.num_psqt_buckets
     self.num_ls_buckets = feature_set.num_ls_buckets
@@ -126,6 +126,7 @@ class NNUE(pl.LightningModule):
     self.feature_set = feature_set
     self.layer_stacks = LayerStacks(self.num_ls_buckets)
     self.lambda_ = lambda_
+    self.draw_weight = draw_weight
     self.lr = lr
 
     self.weight_clipping = [
@@ -268,12 +269,12 @@ class NNUE(pl.LightningModule):
     out_scaling = 361
 
     q = (self(us, them, white_indices, white_values, black_indices, black_values, psqt_indices, layer_stack_indices) * nnue2score / out_scaling).sigmoid()
-    t = outcome
     p = (score / in_scaling).sigmoid()
+    t = (1.0 - self.lambda_) * outcome + self.lambda_ * p
 
-    loss_eval = (p - q).square().mean()
-    loss_result = (q - t).square().mean()
-    loss = self.lambda_ * loss_eval + (1.0 - self.lambda_) * loss_result
+    draw_mask = torch.isclose(outcome, outcome.new_tensor(0.5))
+    sample_weights = torch.where(draw_mask, outcome.new_tensor(self.draw_weight), outcome.new_tensor(1.0))
+    loss = (((q - t).square().flatten()) * sample_weights.flatten()).mean()
 
     self.log(loss_type, loss)
     self.log('lambda', self.lambda_)
