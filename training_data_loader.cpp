@@ -8,6 +8,7 @@
 #include <thread>
 #include <deque>
 #include <random>
+#include <filesystem>
 
 #include "lib/nnue_training_data_formats.h"
 #include "lib/nnue_training_data_stream.h"
@@ -465,6 +466,21 @@ struct Stream : AnyStream
             {
                 m_streams.emplace_back(std::move(stream));
                 m_stream_mutexes.emplace_back(std::make_unique<std::mutex>());
+
+                double weight = 1.0;
+                try
+                {
+                    const auto bytes = std::filesystem::file_size(filenames[i]);
+                    constexpr double packed_entry_bytes = static_cast<double>(sizeof(nodchip::PackedSfenValue));
+                    // Use estimated entry count as proportional sampling weight.
+                    weight = std::max(1.0, static_cast<double>(bytes) / packed_entry_bytes);
+                }
+                catch (...)
+                {
+                    // Keep default fallback for paths where size cannot be queried.
+                    weight = 1.0;
+                }
+                m_stream_sampling_weights.emplace_back(weight);
             }
         }
     }
@@ -474,6 +490,7 @@ struct Stream : AnyStream
 protected:
     std::vector<std::unique_ptr<training_data::BasicSfenInputStream>> m_streams;
     std::vector<std::unique_ptr<std::mutex>> m_stream_mutexes;
+    std::vector<double> m_stream_sampling_weights;
 };
 
 template <typename StorageT>
@@ -538,7 +555,10 @@ struct FeaturedBatchStream : Stream<StorageT>
                     break;
 
                 static thread_local std::mt19937 pick_stream_gen(std::random_device{}());
-                std::uniform_int_distribution<std::size_t> pick_stream(0, BaseType::m_streams.size() - 1);
+                std::discrete_distribution<std::size_t> pick_stream(
+                    BaseType::m_stream_sampling_weights.begin(),
+                    BaseType::m_stream_sampling_weights.end()
+                );
 
                 // True random interleaving: choose a random stream per entry.
                 for (int eidx = 0; eidx < m_batch_size; ++eidx)
