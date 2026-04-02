@@ -8,6 +8,7 @@
 #include <thread>
 #include <deque>
 #include <random>
+#include <filesystem>
 
 #include "lib/nnue_training_data_formats.h"
 #include "lib/nnue_training_data_stream.h"
@@ -62,6 +63,18 @@ static Square orient_flip(Color color, Square sq)
     }
 }
 
+
+static Square mirror_square_with_files(Square sq)
+{
+    if (sq == Square::NB)
+        return sq;
+
+    const int sq_idx = static_cast<int>(sq);
+    const int rank = sq_idx / FILES;
+    const int file = sq_idx % FILES;
+    return static_cast<Square>(rank * FILES + ((FILES - 1) - file));
+}
+
 static int map_king(Square sq)
 {
     // palace squares for Xiangi/Janggi
@@ -86,17 +99,20 @@ struct HalfKP {
         return 1 + static_cast<int>(orient(color, sq)) + p_idx * NUM_SQ + map_king(ksq) * NUM_PLANES;
     }
 
-    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color)
+    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color, bool horizontal_mirroring)
     {
         auto& pos = e.pos;
         auto ksq = pos.kingSquare(color);
+        if (horizontal_mirroring)
+            ksq = mirror_square_with_files(ksq);
 
         // We order the features so that the resulting sparse
         // tensor is coalesced.
         int j = 0;
         for(Square sq = Square::MIN; sq <= Square::MAX; ++sq)
         {
-            auto p = pos.pieceAt(sq);
+            const auto src_sq = horizontal_mirroring ? mirror_square_with_files(sq) : sq;
+            auto p = pos.pieceAt(src_sq);
             if (p == Piece::None || type_of(p) == PieceType::King)
                 continue;
             values[j] = 1.0f;
@@ -118,14 +134,16 @@ struct HalfKPFactorized {
     static constexpr int MAX_PIECE_FEATURES = MAX_PIECES;
     static constexpr int MAX_ACTIVE_FEATURES = HalfKP::MAX_ACTIVE_FEATURES + MAX_K_FEATURES + MAX_PIECE_FEATURES;
 
-    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color)
+    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color, bool horizontal_mirroring)
     {
-        auto [start_j, offset] = HalfKP::fill_features_sparse(e, features, values, color);
+        auto [start_j, offset] = HalfKP::fill_features_sparse(e, features, values, color, horizontal_mirroring);
         int j = start_j;
         auto& pos = e.pos;
         {
             // king square factor
             auto ksq = pos.kingSquare(color);
+            if (horizontal_mirroring)
+                ksq = mirror_square_with_files(ksq);
             features[j] = offset + static_cast<int>(orient(color, ksq));
             values[j] = static_cast<float>(start_j);
             ++j;
@@ -138,7 +156,8 @@ struct HalfKPFactorized {
         // halfk feature where it was.
         for(Square sq = Square::MIN; sq <= Square::MAX; ++sq)
         {
-            auto p = pos.pieceAt(sq);
+            const auto src_sq = horizontal_mirroring ? mirror_square_with_files(sq) : sq;
+            auto p = pos.pieceAt(src_sq);
             if (p == Piece::None || type_of(p) == PieceType::King)
                 continue;
             auto p_idx = static_cast<int>(type_of(p)) * 2 + (color_of(p) != color);
@@ -165,15 +184,18 @@ struct HalfKA {
         return 1 + static_cast<int>(orient_flip(color, sq)) + p_idx * NUM_SQ + map_king(ksq) * NUM_PLANES;
     }
 
-    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color)
+    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color, bool horizontal_mirroring)
     {
         auto& pos = e.pos;
         auto ksq = pos.kingSquare(color);
+        if (horizontal_mirroring)
+            ksq = mirror_square_with_files(ksq);
 
         int j = 0;
         for(Square sq = Square::MIN; sq <= Square::MAX; ++sq)
         {
-            auto p = pos.pieceAt(sq);
+            const auto src_sq = horizontal_mirroring ? mirror_square_with_files(sq) : sq;
+            auto p = pos.pieceAt(src_sq);
             if (p == Piece::None)
                 continue;
             values[j] = 1.0f;
@@ -193,15 +215,16 @@ struct HalfKAFactorized {
     static constexpr int MAX_PIECE_FEATURES = MAX_PIECES;
     static constexpr int MAX_ACTIVE_FEATURES = HalfKA::MAX_ACTIVE_FEATURES + MAX_PIECE_FEATURES;
 
-    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color)
+    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color, bool horizontal_mirroring)
     {
-        const auto [start_j, offset] = HalfKA::fill_features_sparse(e, features, values, color);
+        const auto [start_j, offset] = HalfKA::fill_features_sparse(e, features, values, color, horizontal_mirroring);
         auto& pos = e.pos;
 
         int j = start_j;
         for(Square sq = Square::MIN; sq <= Square::MAX; ++sq)
         {
-            auto p = pos.pieceAt(sq);
+            const auto src_sq = horizontal_mirroring ? mirror_square_with_files(sq) : sq;
+            auto p = pos.pieceAt(src_sq);
             if (p == Piece::None)
                 continue;
             auto p_idx = static_cast<int>(type_of(p)) * 2 + (color_of(p) != color);
@@ -237,15 +260,18 @@ struct HalfKAv2 {
         return handCount + p_idx * MAX_HAND_PIECES + NUM_SQ * NUM_PT + map_king(ksq) * NUM_PLANES;
     }
 
-    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color)
+    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color, bool horizontal_mirroring)
     {
         auto& pos = e.pos;
         auto ksq = pos.kingSquare(color);
+        if (horizontal_mirroring)
+            ksq = mirror_square_with_files(ksq);
 
         int j = 0;
         for(Square sq = Square::MIN; sq <= Square::MAX; ++sq)
         {
-            auto p = pos.pieceAt(sq);
+            const auto src_sq = horizontal_mirroring ? mirror_square_with_files(sq) : sq;
+            auto p = pos.pieceAt(src_sq);
             if (p == Piece::None)
                 continue;
             values[j] = 1.0f;
@@ -275,15 +301,16 @@ struct HalfKAv2Factorized {
     static constexpr int MAX_PIECE_FEATURES = MAX_PIECES;
     static constexpr int MAX_ACTIVE_FEATURES = HalfKAv2::MAX_ACTIVE_FEATURES + MAX_PIECE_FEATURES;
 
-    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color)
+    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color, bool horizontal_mirroring)
     {
-        const auto [start_j, offset] = HalfKAv2::fill_features_sparse(e, features, values, color);
+        const auto [start_j, offset] = HalfKAv2::fill_features_sparse(e, features, values, color, horizontal_mirroring);
         auto& pos = e.pos;
 
         int j = start_j;
         for(Square sq = Square::MIN; sq <= Square::MAX; ++sq)
         {
-            auto p = pos.pieceAt(sq);
+            const auto src_sq = horizontal_mirroring ? mirror_square_with_files(sq) : sq;
+            auto p = pos.pieceAt(src_sq);
             if (p == Piece::None)
                 continue;
             auto p_idx = static_cast<int>(type_of(p)) * 2 + (color_of(p) != color);
@@ -314,9 +341,9 @@ struct FeatureSet
     static constexpr int INPUTS = T::INPUTS;
     static constexpr int MAX_ACTIVE_FEATURES = T::MAX_ACTIVE_FEATURES;
 
-    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color)
+    static std::pair<int, int> fill_features_sparse(const TrainingDataEntry& e, int* features, float* values, Color color, bool horizontal_mirroring)
     {
-        return T::fill_features_sparse(e, features, values, color);
+        return T::fill_features_sparse(e, features, values, color, horizontal_mirroring);
     }
 };
 
@@ -325,7 +352,8 @@ struct SparseBatch
     static constexpr bool IS_BATCH = true;
 
     template <typename... Ts>
-    SparseBatch(FeatureSet<Ts...>, const std::vector<TrainingDataEntry>& entries)
+    SparseBatch(FeatureSet<Ts...>, const std::vector<TrainingDataEntry>& entries, bool horizontal_mirroring)
+        : m_horizontal_mirroring(horizontal_mirroring)
     {
         num_inputs = FeatureSet<Ts...>::INPUTS;
         size = entries.size();
@@ -373,6 +401,7 @@ struct SparseBatch
     float* black_values;
     int* psqt_indices;
     int* layer_stack_indices;
+    bool m_horizontal_mirroring;
 
     ~SparseBatch()
     {
@@ -388,27 +417,30 @@ struct SparseBatch
     }
 
 private:
-
     template <typename... Ts>
     void fill_entry(FeatureSet<Ts...>, int i, const TrainingDataEntry& e)
     {
+        static thread_local std::mt19937 mirror_gen(std::random_device{}());
+        static thread_local std::bernoulli_distribution mirror_coin(0.5);
+        const bool do_mirror = m_horizontal_mirroring && mirror_coin(mirror_gen);
         is_white[i] = static_cast<float>(e.pos.sideToMove() == Color::White);
         outcome[i] = (e.result + 1.0f) / 2.0f;
+
         score[i] = e.score;
         psqt_indices[i] = (e.pos.pieceCount() - 1) * 8 / MAX_PIECES;
         layer_stack_indices[i] = psqt_indices[i];
-        fill_features(FeatureSet<Ts...>{}, i, e);
+        fill_features(FeatureSet<Ts...>{}, i, e, do_mirror);
     }
 
     template <typename... Ts>
-    void fill_features(FeatureSet<Ts...>, int i, const TrainingDataEntry& e)
+    void fill_features(FeatureSet<Ts...>, int i, const TrainingDataEntry& e, bool do_mirror)
     {
         const int offset = i * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES;
         num_active_white_features +=
-            FeatureSet<Ts...>::fill_features_sparse(e, white + offset, white_values + offset, Color::White)
+            FeatureSet<Ts...>::fill_features_sparse(e, white + offset, white_values + offset, Color::White, do_mirror)
             .first;
         num_active_black_features +=
-            FeatureSet<Ts...>::fill_features_sparse(e, black + offset, black_values + offset, Color::Black)
+            FeatureSet<Ts...>::fill_features_sparse(e, black + offset, black_values + offset, Color::Black, do_mirror)
             .first;
     }
 };
@@ -423,15 +455,42 @@ struct Stream : AnyStream
 {
     using StorageType = StorageT;
 
-    Stream(int concurrency, const char* filename, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate) :
-        m_stream(training_data::open_sfen_input_file_parallel(concurrency, filename, cyclic, skipPredicate))
+    Stream(int concurrency, const char** filenames, int num_files, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate)
     {
+        m_streams.reserve(num_files);
+        m_stream_mutexes.reserve(num_files);
+        for (int i = 0; i < num_files; ++i)
+        {
+            auto stream = training_data::open_sfen_input_file_parallel(concurrency, filenames[i], cyclic, skipPredicate);
+            if (stream)
+            {
+                m_streams.emplace_back(std::move(stream));
+                m_stream_mutexes.emplace_back(std::make_unique<std::mutex>());
+
+                double weight = 1.0;
+                try
+                {
+                    const auto bytes = std::filesystem::file_size(filenames[i]);
+                    constexpr double packed_entry_bytes = static_cast<double>(sizeof(nodchip::PackedSfenValue));
+                    // Use estimated entry count as proportional sampling weight.
+                    weight = std::max(1.0, static_cast<double>(bytes) / packed_entry_bytes);
+                }
+                catch (...)
+                {
+                    // Keep default fallback for paths where size cannot be queried.
+                    weight = 1.0;
+                }
+                m_stream_sampling_weights.emplace_back(weight);
+            }
+        }
     }
 
     virtual StorageT* next() = 0;
 
 protected:
-    std::unique_ptr<training_data::BasicSfenInputStream> m_stream;
+    std::vector<std::unique_ptr<training_data::BasicSfenInputStream>> m_streams;
+    std::vector<std::unique_ptr<std::mutex>> m_stream_mutexes;
+    std::vector<double> m_stream_sampling_weights;
 };
 
 template <typename StorageT>
@@ -439,8 +498,8 @@ struct AsyncStream : Stream<StorageT>
 {
     using BaseType = Stream<StorageT>;
 
-    AsyncStream(int concurrency, const char* filename, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate) :
-        BaseType(1, filename, cyclic, skipPredicate)
+    AsyncStream(int concurrency, const char** filenames, int num_files, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate) :
+        BaseType(1, filenames, num_files, cyclic, skipPredicate)
     {
     }
 
@@ -466,18 +525,20 @@ struct FeaturedBatchStream : Stream<StorageT>
 
     static constexpr int num_feature_threads_per_reading_thread = 2;
 
-    FeaturedBatchStream(int concurrency, const char* filename, int batch_size, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate) :
+    FeaturedBatchStream(int concurrency, const char** filenames, int num_files, int batch_size, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate, bool horizontal_mirroring) :
         BaseType(
             std::max(
                 1,
                 concurrency / num_feature_threads_per_reading_thread
             ),
-            filename,
+            filenames,
+            num_files,
             cyclic,
             skipPredicate
         ),
         m_concurrency(concurrency),
-        m_batch_size(batch_size)
+        m_batch_size(batch_size),
+        m_horizontal_mirroring(horizontal_mirroring)
     {
         m_stop_flag.store(false);
 
@@ -486,20 +547,52 @@ struct FeaturedBatchStream : Stream<StorageT>
             std::vector<TrainingDataEntry> entries;
             entries.reserve(m_batch_size);
 
+            static thread_local std::mt19937 pick_stream_gen(std::random_device{}());
+            std::discrete_distribution<std::size_t> pick_stream(
+                BaseType::m_stream_sampling_weights.begin(),
+                BaseType::m_stream_sampling_weights.end()
+            );
+
             while(!m_stop_flag.load())
             {
                 entries.clear();
 
+                if (BaseType::m_streams.empty())
+                    break;
+
+                int consecutive_misses = 0;
+                const int miss_limit = std::max(8, m_batch_size);
+
+                // True random interleaving: choose a random stream per sampled entry.
+                while (entries.size() < static_cast<std::size_t>(m_batch_size) && !m_stop_flag.load())
                 {
-                    std::unique_lock lock(m_stream_mutex);
-                    BaseType::m_stream->fill(entries, m_batch_size);
-                    if (entries.empty())
+                    const std::size_t stream_idx = pick_stream(pick_stream_gen);
+                    auto& stream = BaseType::m_streams[stream_idx];
+                    auto& stream_mutex = *BaseType::m_stream_mutexes[stream_idx];
+
+                    std::optional<TrainingDataEntry> value;
                     {
-                        break;
+                        std::unique_lock lock(stream_mutex);
+                        value = stream->next();
+                    }
+
+                    if (value.has_value())
+                    {
+                        entries.emplace_back(*value);
+                        consecutive_misses = 0;
+                    }
+                    else
+                    {
+                        ++consecutive_misses;
+                        if (consecutive_misses >= miss_limit)
+                            break;
                     }
                 }
 
-                auto batch = new StorageT(FeatureSet{}, entries);
+                if (entries.empty())
+                    break;
+
+                auto batch = new StorageT(FeatureSet{}, entries, m_horizontal_mirroring);
 
                 {
                     std::unique_lock lock(m_batch_mutex);
@@ -573,9 +666,9 @@ struct FeaturedBatchStream : Stream<StorageT>
 private:
     int m_batch_size;
     int m_concurrency;
+    bool m_horizontal_mirroring;
     std::deque<StorageT*> m_batches;
     std::mutex m_batch_mutex;
-    std::mutex m_stream_mutex;
     std::condition_variable m_batches_not_full;
     std::condition_variable m_batches_any;
     std::atomic_bool m_stop_flag;
@@ -605,7 +698,6 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
                 return false;
             };
 
-            static thread_local std::mt19937 gen(std::random_device{}());
             return (random_fen_skipping && do_skip()) || (filtered && do_filter());
         };
     }
@@ -615,34 +707,34 @@ std::function<bool(const TrainingDataEntry&)> make_skip_predicate(bool filtered,
 
 extern "C" {
 
-    EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char* feature_set_c, int concurrency, const char* filename, int batch_size, bool cyclic, bool filtered, int random_fen_skipping)
+    EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char* feature_set_c, int concurrency, const char** filenames, int num_files, int batch_size, bool cyclic, bool filtered, int random_fen_skipping, bool horizontal_mirroring)
     {
         auto skipPredicate = make_skip_predicate(filtered, random_fen_skipping);
 
         std::string_view feature_set(feature_set_c);
         if (feature_set == "HalfKP")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKP>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate);
+            return new FeaturedBatchStream<FeatureSet<HalfKP>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKP^")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKPFactorized>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate);
+            return new FeaturedBatchStream<FeatureSet<HalfKPFactorized>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKA")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKA>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate);
+            return new FeaturedBatchStream<FeatureSet<HalfKA>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKA^")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKAFactorized>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate);
+            return new FeaturedBatchStream<FeatureSet<HalfKAFactorized>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKAv2")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKAv2>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate);
+            return new FeaturedBatchStream<FeatureSet<HalfKAv2>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         else if (feature_set == "HalfKAv2^")
         {
-            return new FeaturedBatchStream<FeatureSet<HalfKAv2Factorized>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate);
+            return new FeaturedBatchStream<FeatureSet<HalfKAv2Factorized>, SparseBatch>(concurrency, filenames, num_files, batch_size, cyclic, skipPredicate, horizontal_mirroring);
         }
         fprintf(stderr, "Unknown feature_set %s\n", feature_set_c);
         return nullptr;
@@ -670,7 +762,8 @@ extern "C" {
 
 int main()
 {
-    auto stream = create_sparse_batch_stream("HalfKP", 4, "10m_d3_q_2.bin", 8192, true, false, 0);
+    const char* files[] = {"10m_d3_q_2.bin"};
+    auto stream = create_sparse_batch_stream("HalfKP", 4, files, 1, 8192, true, false, 0, false);
     auto t0 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < 1000; ++i)
     {

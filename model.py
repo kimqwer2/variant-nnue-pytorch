@@ -1,7 +1,6 @@
 import ranger
 import torch
 from torch import nn
-import torch.nn.functional as F
 import pytorch_lightning as pl
 import copy
 from feature_transformer import DoubleFeatureTransformerSlice
@@ -114,12 +113,12 @@ class NNUE(pl.LightningModule):
   """
   This model attempts to directly represent the nodchip Stockfish trainer methodology.
 
-  lambda_ = 0.0 - purely based on game results
-  lambda_ = 1.0 - purely based on search scores
+  lambda = 0.0 - purely based on game results
+  lambda = 1.0 - purely based on search scores
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0):
+  def __init__(self, feature_set, lambda_=1.0, draw_weight=1.0, lr=1.5e-3):
     super(NNUE, self).__init__()
     self.num_psqt_buckets = feature_set.num_psqt_buckets
     self.num_ls_buckets = feature_set.num_ls_buckets
@@ -127,6 +126,8 @@ class NNUE(pl.LightningModule):
     self.feature_set = feature_set
     self.layer_stacks = LayerStacks(self.num_ls_buckets)
     self.lambda_ = lambda_
+    self.draw_weight = draw_weight
+    self.lr = lr
 
     self.weight_clipping = [
       {'params' : [self.layer_stacks.l1.weight], 'min_weight' : -127/64, 'max_weight' : 127/64, 'virtual_params' : self.layer_stacks.l1_fact.weight },
@@ -268,14 +269,15 @@ class NNUE(pl.LightningModule):
     out_scaling = 361
 
     q = (self(us, them, white_indices, white_values, black_indices, black_values, psqt_indices, layer_stack_indices) * nnue2score / out_scaling).sigmoid()
-    t = outcome
     p = (score / in_scaling).sigmoid()
+    t = (1.0 - self.lambda_) * outcome + self.lambda_ * p
 
-    loss_eval = (p - q).square().mean()
-    loss_result = (q - t).square().mean()
-    loss = self.lambda_ * loss_eval + (1.0 - self.lambda_) * loss_result
+    draw_mask = torch.isclose(outcome, outcome.new_tensor(0.5))
+    sample_weights = torch.where(draw_mask, outcome.new_tensor(self.draw_weight), outcome.new_tensor(1.0))
+    loss = (((q - t).square().flatten()) * sample_weights.flatten()).mean()
 
     self.log(loss_type, loss)
+    self.log('lambda', self.lambda_)
 
     return loss
 
@@ -295,7 +297,7 @@ class NNUE(pl.LightningModule):
 
   def configure_optimizers(self):
     # Train with a lower LR on the output layer
-    LR = 1.5e-3
+    LR = self.lr
     train_params = [
       {'params' : get_parameters([self.input]), 'lr' : LR, 'gc_dim' : 0 },
       {'params' : [self.layer_stacks.l1_fact.weight], 'lr' : LR },
@@ -308,6 +310,7 @@ class NNUE(pl.LightningModule):
     ]
     # increasing the eps leads to less saturated nets with a few dead neurons
     optimizer = ranger.Ranger(train_params, betas=(.9, 0.999), eps=1.0e-7, gc_loc=False, use_gc=False)
+
     # Drop learning rate after 75 epochs
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.987)
     return [optimizer], [scheduler]
