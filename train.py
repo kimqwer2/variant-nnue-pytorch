@@ -26,7 +26,11 @@ def main():
   parser.add_argument("train", help="Training data (.bin)")
   parser.add_argument("val", help="Validation data (.bin)")
   parser = pl.Trainer.add_argparse_args(parser)
-  parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_', help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
+  parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_', help="Deprecated alias for --score-weight.")
+  parser.add_argument("--score-weight", default=None, type=float, dest='score_weight', help="Weight of teacher score target in blended target. 1.0=teacher only, 0.0=WDL only.")
+  parser.add_argument("--l1-size", default=M.DEFAULT_L1, type=int, dest='l1_size', help="First hidden layer width (transformer output).")
+  parser.add_argument("--l2-size", default=M.DEFAULT_L2, type=int, dest='l2_size', help="Second hidden layer width.")
+  parser.add_argument("--l3-size", default=M.DEFAULT_L3, type=int, dest='l3_size', help="Third hidden layer width.")
   parser.add_argument("--num-workers", default=1, type=int, dest='num_workers', help="Number of worker threads to use for data loading. Currently only works well for bin.")
   parser.add_argument("--batch-size", default=-1, type=int, dest='batch_size', help="Number of positions per batch / per iteration. Default on GPU = 8192 on CPU = 128.")
   parser.add_argument("--threads", default=-1, type=int, dest='threads', help="Number of torch threads to use. Default automatic (cores) .")
@@ -47,8 +51,10 @@ def main():
 
   feature_set = features.get_feature_set_from_name(args.features)
 
+  score_weight = args.lambda_ if args.score_weight is None else args.score_weight
+
   if args.resume_from_model is None:
-    nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_)
+    nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, score_weight=score_weight, l1_size=args.l1_size, l2_size=args.l2_size, l3_size=args.l3_size)
     nnue.cuda()
   else:
     # Load with weights_only=False to avoid safe_globals complexity
@@ -56,6 +62,7 @@ def main():
     nnue = torch.load(args.resume_from_model, weights_only=False)
     nnue.set_feature_set(feature_set)
     nnue.lambda_ = args.lambda_
+    nnue.score_weight = score_weight
     nnue.cuda()
 
   print("Feature set: {}".format(feature_set.name))
@@ -64,6 +71,8 @@ def main():
   print("Num features: {}".format(feature_set.num_features))
 
   print("Training with {} validating with {}".format(args.train, args.val))
+  print("Score blend weight (teacher): {}".format(score_weight))
+  print("Network sizes: L1={}, L2={}, L3={}".format(args.l1_size, args.l2_size, args.l3_size))
 
   pl.seed_everything(args.seed)
   print("Seed {}".format(args.seed))
